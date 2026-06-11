@@ -1,0 +1,264 @@
+// ==UserScript==
+// @name         GeoFS AI ATC
+// @namespace    https://github.com/KingBeiLiYa/GeoFS-ATC-Test-Version
+// @version      1.1.2
+// @description  透明ATC | 高原机场复飞修复 | 自定义指令 | 按T开关
+// @author       不宅的飞友
+// @match        https://*/*
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+(function(){
+'use strict';
+const A="https://space.bilibili.com/3546664033847377";
+const PHASE={GROUND:0,TAXI:1,RUNWAY:2,TAKEOFF:3,CLIMB:4,CRUISE:5,DESCENT:6,APPROACH:7,LANDING:8,TAXI_IN:9,PARKING:10,GO_AROUND:11};
+const PN={0:"停机位",1:"滑行",2:"跑道等待",3:"起飞",4:"爬升",5:"巡航",6:"下降",7:"进近",8:"着陆",9:"滑入",10:"到位",11:"复飞"};
+const PCMDS={
+[PHASE.GROUND]:["请求推出"],[PHASE.TAXI]:["请求滑行","请求进入跑道"],[PHASE.RUNWAY]:["请求进入跑道","请求起飞"],[PHASE.TAKEOFF]:["请求起飞"],
+[PHASE.CLIMB]:["请求爬升","请求航向变更","请求速度变更"],[PHASE.CRUISE]:["请求下降","请求航向变更","请求速度变更"],
+[PHASE.DESCENT]:["请求下降","请求进近","请求航向变更","请求速度变更"],[PHASE.APPROACH]:["请求进近","请求降落","请求复飞"],[PHASE.LANDING]:["请求降落","脱离跑道","请求复飞"],
+[PHASE.TAXI_IN]:["脱离跑道","请求到位"],[PHASE.PARKING]:[],[PHASE.GO_AROUND]:["请求复飞","请求爬升","请求进近"]};
+const L={
+callsign:"呼号",dep:"起飞机场",arr:"到达机场",confirm:"确认起飞",end:"结束航班",empty_c:"请填写呼号",empty_i:"请填写起降机场",
+ended:"ATC服务已结束，请点击结束航班重新开始。",phase_err:(c,p)=>`${c}，当前阶段为${p}，不能执行此指令。`,unauth:c=>`${c}，擅自起飞，频率丢失...`,
+unauth_to:c=>`${c}，无响应，ATC服务终止。`,dnd_w:"免打扰模式下无法发送指令",
+taxi:c=>`${c}，可以滑行，沿滑行道至跑道。`,push:c=>`${c}，可以推出。`,lineup:c=>`${c}，可以进入跑道，等待起飞指令。`,
+to:(c,a)=>`${c}，跑道${a}，可以起飞，离地后联系离场。`,to_deny:(c,t)=>`${c}，时间未到，请等待至 ${t}。`,airborne:c=>`${c}，你已经离地了，无法再次起飞。`,
+land:(c,a)=>`${c}，跑道${a}，可以降落。`,gnd:c=>`${c}，你已经在跑道上了，无法再次降落。`,
+alt_a:(c,a)=>`${c}，同意上到${a}英尺。`,alt_d:(c,a)=>`${c}，不同意，请保持当前高度。`,
+desc_a:(c,a)=>`${c}，同意下到${a}英尺。`,desc_d:(c,a)=>`${c}，不同意，有交叉交通。`,
+hdg_a:(c,h)=>`${c}，航向${h}度。`,hdg_d:(c,h)=>`${c}，不同意，请继续当前航向。`,
+spd_a:(c,s)=>`${c}，速度${s}节。`,spd_d:(c,s)=>`${c}，不同意，请保持当前速度。`,
+app_a:(c,a,t)=>`${c}，可以进近，跑道${a}，预计${t}落地。`,
+go_det:c=>`${c}，你好像在复飞，取消落地许可。`,go_app:c=>`${c}，复飞批准，上到3000英尺，等待下一步指令。`,
+departure:c=>`${c}，离场已批准，可以爬升。`,
+req_pos:(c,lat,lon,alt,spd,hdg)=>`${c}，当前位置，北纬${lat}，东经${lon}，高度${alt}英尺。`,
+rep_pos:(c,lat,lon,alt,spd,hdg)=>`${c}，当前位置报告，${lat}北，${lon}东，高度${alt}英尺。`,
+rep_ack:c=>`${c}，位置收到，继续执行。`,
+auto:c=>`${c}，报告你现在的位置。`,
+urgent:c=>`${c}，信号丢失，收到请回复。`,
+no_resp:(c,n)=>`${c}，${n===1?"请回答":n===2?"收到请回复":"最后一次叫你"}`,
+to_ct:c=>`${c}，ATC服务已暂停。`,
+early_to:c=>`${c}，提前起飞。`,late_to:c=>`${c}，晚点起飞。`,ontime_to:c=>`${c}，准时起飞。`,
+early_land:c=>`${c}，降落提前。`,late_land:c=>`${c}，降落晚点。`,ontime_land:c=>`${c}，准时降落。`,
+bye:"ATC服务结束。",set:"设置",range:"呼叫范围",custom:"自定义指令",add:"添加",del:"删除",dnd:"免打扰模式",dnd_desc:"开启后ATC不会主动呼叫，且无法发送指令"};
+const ALL=["请求推出","请求滑行","请求进入跑道","请求起飞","请求爬升","请求下降","请求航向变更","请求速度变更","请求进近","请求降落","请求复飞","脱离跑道","请求到位","请求位置"];
+const R=["收到","明白","正在执行","报告位置","再见"];
+const P={climb:.6,descend:.6,heading:.65,speed:.7,approach:1};
+let c="",d="",a="",mSt=null,info=false,active=false,ended=false,toClear=false,phase=PHASE.GROUND,hid=false;
+let panel=null,setP=null,hist=JSON.parse(localStorage.getItem("atcHistory")||"[]"),logs=[];
+let min=parseInt(localStorage.getItem("atcMin")||"100"),max=parseInt(localStorage.getItem("atcMax")||"200");
+let vol=parseFloat(localStorage.getItem("atcVol")||".8"),sc=parseFloat(localStorage.getItem("atcScale")||"1");
+let blur=localStorage.getItem("atcBlur")!=="false",dnd=localStorage.getItem("atcDnd")==="true";
+let cust=JSON.parse(localStorage.getItem("atcCustom")||"[]");
+let timer=null,noR=0,lastIn=Date.now(),waitResp=false,toTime=null,landTime=null,toNot=false,hasTo=false,hasLand=false,go=false,lastTouch=0,wasGnd=false;
+let voice=null,unauthTimer=null,wasAir=false,goStart=null,touchTime=null,airTime=null,stable=true;
+function ac(){return window.geofs?.aircraft?.instance}
+function isGnd(){if(mSt!==null)return mSt;try{return ac()?.groundContact===true}catch(e){return false}}
+function getSt(){let v=geofs.animation?.values||{};return{alt:Math.round(v.altitude||0),spd:Math.round(v.groundSpeedKnt||0),hdg:Math.round(v.heading||0),vs:Math.round(v.verticalSpeed||0),gnd:isGnd()}}
+// ==================== 离地高度函数（从HUD移植） ====================
+function getAGL(){
+    try{
+        let a=ac();
+        if(!a)return 0;
+        let lla = a.llaLocation;
+        if(!lla) return 0;
+        if(window.geofs?.getGroundAltitude){
+            let groundInfo = window.geofs.getGroundAltitude(lla[0], lla[1]);
+            let groundAlt = groundInfo?.location?.[2] || groundInfo || 0;
+            let agl = (lla[2] - groundAlt) * 3.28084;
+            if(agl > 0 && agl < 50000) return agl;
+        }
+        let relAlt = a.relativeAltitude;
+        if(relAlt !== undefined && relAlt > 0) return relAlt * 3.28084;
+        return 0;
+    }catch(e){return 0}
+}
+function getGPS(){try{let i=ac(),l=i?.llaLocation||i?.location;if(l&&l.length>=2){let la=l[0],lo=l[1];return{lat:Math.abs(la).toFixed(4),lon:Math.abs(lo).toFixed(4),latDir:la>=0?"N":"S",lonDir:lo>=0?"E":"W",valid:true}}}catch(e){}return{lat:"未知",lon:"未知",valid:false}}
+function initVoice(){return new Promise((r)=>{function load(){let v=window.speechSynthesis.getVoices();if(v.length>0){voice=v.find(v=>v.name==="云阳在线（自然版）-中文（大陆版）")||v.find(v=>v.name.includes("云阳"))||v.find(v=>v.name.includes("Yunyang"))||v.find(v=>v.lang==="zh-CN"&&v.name.includes("Tiantian"))||v.find(v=>v.lang==="zh-CN"&&v.name.includes("Yaoyao"))||v.find(v=>v.lang==="zh-CN"&&!v.name.includes("Tingting")&&(v.name.includes("男")||v.name.toLowerCase().includes("male")));r();}else setTimeout(load,200);}if(window.speechSynthesis){window.speechSynthesis.onvoiceschanged=load;load();}else r();});}
+function speak(t){if(!window.speechSynthesis||vol===0)return;window.speechSynthesis.cancel();let m=new SpeechSynthesisUtterance(t);m.volume=vol;m.lang="zh-CN";m.rate=.85;m.pitch=.7;if(voice)m.voice=voice;window.speechSynthesis.speak(m);}
+function addLog(p,m,co){let div=`<div style="color:${co};font-size:11px;margin:3px 0;">${p}: ${m}</div>`;logs.push(div);let l=document.getElementById("log");if(l){l.innerHTML+=div;l.scrollTop=l.scrollHeight;}hist.push(m);localStorage.setItem("atcHistory",JSON.stringify(hist.slice(-200)));}
+function logS(m){addLog("系统",m,"#aaa");}function logA(m){addLog("ATC",m,"#ffcc44");}function logU(m){addLog("你",m,"#88ccff");}
+function restoreLogs(){let l=document.getElementById("log");if(l&&logs.length>0){l.innerHTML=logs.join("");l.scrollTop=l.scrollHeight;}}
+function clearLogs(){logs=[];}
+function applyScale(){if(panel)panel.style.transform=`scale(${sc})`;if(setP)updateSetPos();}
+function applyBlur(){if(panel){let v=blur?"blur(12px)":"none";panel.style.backdropFilter=v;if(setP)setP.style.backdropFilter=v;}}
+function updateSetPos(){if(setP&&panel){let r=panel.getBoundingClientRect();setP.style.top=r.top+"px";setP.style.left=r.right+"px";setP.style.maxHeight=panel.offsetHeight+"px";}}
+function getAvail(){let cm=PCMDS[phase]||[];if(phase===PHASE.GO_AROUND)cm=["请求复飞","请求爬升","请求进近"];return cm;}
+function refreshQ(){
+    let q=document.getElementById("q");if(!q)return;
+    let ava=getAvail();
+    let all=[...ava,...cust];
+    q.innerHTML=`<option value="" style="color:#aaa;">快捷指令</option>${all.map(c=>`<option value="${c.cmd||c}" style="color:${c.color||"#cccccc"};">${c.cmd||c}</option>`).join("")}`;
+}
+function saveCust(){localStorage.setItem("atcCustom",JSON.stringify(cust));refreshQ();}
+function refreshCust(){
+    let cdiv=document.getElementById("clist");if(!cdiv)return;
+    cdiv.innerHTML=cust.map((c,i)=>`<div style="display:flex;justify-content:space-between;align-items:center;margin:4px 0;padding:3px;background:rgba(255,255,255,0.1);border-radius:4px;"><span style="font-size:10px;color:#fff;">${c.cmd}</span><button data-idx="${i}" class="delc" style="background:#f44336;border:none;border-radius:3px;color:#fff;cursor:pointer;font-size:9px;padding:2px 6px;">删除</button></div>`).join("");
+    document.querySelectorAll(".delc").forEach(btn=>{btn.onclick=()=>{let idx=parseInt(btn.dataset.idx);cust.splice(idx,1);saveCust();refreshCust();refreshQ();}});
+}
+function updatePhase(cmd){switch(cmd){
+    case"请求推出":phase=PHASE.TAXI;break;case"请求滑行":phase=PHASE.RUNWAY;break;case"请求进入跑道":phase=PHASE.TAKEOFF;break;
+    case"请求起飞":phase=PHASE.CLIMB;logA(L.departure(c));speak(L.departure(c));break;
+    case"请求爬升":if(phase!==PHASE.GO_AROUND)phase=PHASE.CRUISE;break;case"请求下降":phase=PHASE.DESCENT;break;
+    case"请求进近":phase=PHASE.APPROACH;break;case"请求降落":phase=PHASE.LANDING;break;case"脱离跑道":phase=PHASE.TAXI_IN;break;
+    case"请求到位":phase=PHASE.PARKING;endFlight();break;case"请求复飞":phase=PHASE.GO_AROUND;break;
+}}
+function schedTo(){let n=new Date();toTime=new Date(n.getTime()+5*60*1000);let t=toTime.toLocaleTimeString("zh-CN",{hour:'2-digit',minute:'2-digit'});logS(`计划起飞时间为 ${t}`);speak(`${c}，计划起飞时间为 ${t}`);}
+function schedLand(){let n=new Date(),dd=5+Math.floor(Math.random()*6);landTime=new Date(n.getTime()+dd*60*1000);return landTime.toLocaleTimeString("zh-CN",{hour:'2-digit',minute:'2-digit'});}
+function checkTo(){if(!toTime||hasTo)return;let diff=(new Date()-toTime)/60000;if(Math.abs(diff)<=1){logA(L.ontime_to(c));speak(L.ontime_to(c));}else if(diff<-1){logA(L.early_to(c));speak(L.early_to(c));}else if(diff>1){logA(L.late_to(c));speak(L.late_to(c));}hasTo=true;}
+function checkLand(){if(!landTime||hasLand)return;let diff=(new Date()-landTime)/60000;if(Math.abs(diff)<=5){logA(L.ontime_land(c));speak(L.ontime_land(c));}else if(diff<-5){logA(L.early_land(c));speak(L.early_land(c));}else if(diff>5){logA(L.late_land(c));speak(L.late_land(c));}hasLand=true;}
+function checkGo(){
+    let rel=(phase===PHASE.APPROACH||phase===PHASE.LANDING||phase===PHASE.GO_AROUND);
+    if(!rel)return;
+    let vs=getSt().vs;
+    let agl=getAGL();  // 关键修复：使用离地高度代替海拔高度！
+    let curGnd=isGnd(),inAir=!curGnd,isClimb=vs>500,isLow=agl<3000;
+    let isToPhase=(phase===PHASE.TAKEOFF);
+    if(inAir&&isClimb&&isLow&&!isToPhase){
+        if(goStart===null){
+            goStart=Date.now();
+        }else if(Date.now()-goStart>=2000&&!go){
+            go=true;logA(L.go_det(c));speak(L.go_det(c));phase=PHASE.GO_AROUND;landTime=null;refreshQ();setTimeout(()=>{go=false;goStart=null;},3e4);
+        }
+    }else if(!wasGnd&&curGnd){
+        touchTime=Date.now();airTime=null;stable=true;
+    }else if(wasGnd&&!curGnd&&touchTime){
+        let ts=(Date.now()-touchTime)/1000;
+        if(ts<=2)airTime=Date.now();
+        else{touchTime=null;airTime=null;}
+    }else if(airTime&&inAir){
+        let ta=(Date.now()-airTime)/1000;
+        if(vs<=0)stable=false;
+        if(ta>=2){
+            if(!curGnd){
+                if(ta>=5&&stable&&!go){
+                    go=true;logA(L.go_det(c));speak(L.go_det(c));phase=PHASE.GO_AROUND;landTime=null;refreshQ();setTimeout(()=>{go=false;},3e4);
+                    touchTime=null;airTime=null;
+                }
+            }else{touchTime=null;airTime=null;stable=true;}
+        }
+    }else{goStart=null;}
+    wasGnd=curGnd;
+}
+function checkUnauth(){if(!active||ended||!info)return;let cur=isGnd();if(!wasAir&&!cur&&!toClear){if(unauthTimer===null){unauthTimer=setTimeout(()=>{if(!active||ended)return;logA(L.unauth(c));speak(L.unauth(c));unauthTimer=setTimeout(()=>{if(!active||ended)return;logA(L.unauth_to(c));speak(L.unauth_to(c));active=false;ended=true;if(timer)clearTimeout(timer);},1e4);},2e3);}}if(wasAir&&cur){if(unauthTimer){clearTimeout(unauthTimer);unauthTimer=null;}}wasAir=!cur;}
+function reqPos(){let s=getSt(),g=getGPS();let r=g.valid?L.req_pos(c,`${g.lat}${g.latDir}`,`${g.lon}${g.lonDir}`,s.alt,s.spd,s.hdg):`${c}，高度${s.alt}英尺，速度${s.spd}节。`;logA(r);speak(r);}
+function repPos(){let s=getSt(),g=getGPS();let r=g.valid?L.rep_pos(c,`${g.lat}${g.latDir}`,`${g.lon}${g.lonDir}`,s.alt,s.spd,s.hdg):`${c}报告，高度${s.alt}英尺，速度${s.spd}节。`;logU(r);speak(r);let ack=L.rep_ack(c);logA(ack);speak(ack);lastIn=Date.now();noR=0;waitResp=false;}
+function reqGo(){let r=L.go_app(c);logA(r);speak(r);phase=PHASE.GO_AROUND;landTime=null;refreshQ();}
+function sayBye(){logU("再见");logA(L.bye);speak(L.bye);ended=true;active=false;}
+function endFlight(){active=false;info=false;ended=false;toClear=false;phase=PHASE.GROUND;c="";d="";a="";toTime=null;landTime=null;toNot=false;hasTo=false;hasLand=false;go=false;lastTouch=0;wasGnd=false;if(unauthTimer)clearTimeout(unauthTimer);wasAir=false;clearLogs();if(timer)clearTimeout(timer);renderInfo();logS("航班已结束，可重新开始");speak("航班已结束。");}
+function remind(){if(toTime){let t=toTime.toLocaleTimeString("zh-CN",{hour:'2-digit',minute:'2-digit'});logA(`${c}，计划起飞时间为 ${t}。`);speak(`${c}，计划起飞时间为 ${t}。`);}}
+function send(cmd){
+    if(!info||ended){if(ended){logS(L.ended);speak(L.ended);}return;}
+    if(dnd){logS(L.dnd_w);speak(L.dnd_w);return;}
+    let isCust=cust.some(ca=>ca.cmd===cmd);
+    let isQuick=R.includes(cmd);
+    if(!isCust&&!isQuick){
+        let ava=getAvail();
+        if(!ava.includes(cmd)&&!ALL.includes(cmd)){
+            logS(L.phase_err(c,PN[phase]));speak(L.phase_err(c,PN[phase]));return;
+        }
+    }
+    logU(cmd);lastIn=Date.now();noR=0;waitResp=false;
+    proc(cmd).then(r=>{
+        if(r){
+            logA(r);speak(r);
+            let deny=["不同意","未到","无法","已在空中","请等待","有交叉交通"];
+            let ok=true;
+            for(let kw of deny)if(r.includes(kw)){ok=false;break;}
+            if(!isCust&&!isQuick&&ok) updatePhase(cmd);
+            refreshQ();
+        }
+    });
+}
+async function proc(cmd){let cc=c,lc=cmd.toLowerCase();
+let custc=cust.find(ca=>ca.cmd.toLowerCase()===lc);if(custc)return custc.reply.replace(/#/g,cc);
+let t=null;if(lc.includes("推出"))t="push";else if(lc.includes("滑行"))t="taxi";else if(lc.includes("进入跑道"))t="line";
+else if(lc.includes("起飞")){toClear=true;t="to";}else if(lc.includes("爬升"))t="climb";
+else if(lc.includes("下降"))t="desc";else if(lc.includes("降落"))t="land";else if(lc.includes("复飞"))t="go";
+else if(lc.includes("脱离跑道"))t="exit";else if(lc.includes("到位"))t="park";else if(lc.includes("请求位置"))t="pos";
+else if(lc.includes("航向"))t="hdg";else if(lc.includes("速度"))t="spd";else if(lc.includes("进近"))t="app";
+else if(lc.includes("收到")||lc.includes("明白")||lc.includes("执行"))t="rog";if(!t){remind();return L.unknown;}
+let r="";switch(t){
+case"push":r=L.push(cc);break;case"taxi":r=L.taxi(cc);break;case"line":r=L.lineup(cc);break;
+case"to":if(isGnd()){if(toTime){let now=new Date(),diff=(now-toTime)/60000;if(Math.abs(diff)<=1){r=L.to(cc,d);if(!toNot)toNot=true;setTimeout(()=>checkTo(),100);}else{let ts=toTime.toLocaleTimeString("zh-CN",{hour:'2-digit',minute:'2-digit'});r=L.to_deny(cc,ts);toClear=false;}}else r=L.to(cc,d);}else r=L.airborne(cc);break;
+case"land":r=!isGnd()?L.land(cc,a):L.gnd(cc);break;
+case"go":reqGo();return"";case"exit":r=`${cc}，可以脱离跑道，滑行至停机位。`;break;
+case"park":r=`${cc}，可以到位，发动机停车，联系地面再见。`;setTimeout(()=>endFlight(),3000);break;
+case"pos":reqPos();return"";case"climb":{let m=cmd.match(/(\\d{3,5})/);if(Math.random()<P.climb)r=m?L.alt_a(cc,m[1]):`${cc}，可以爬升。`;else r=m?L.alt_d(cc,m[1]):`${cc}，不同意，请保持当前高度。`;break;}
+case"desc":{let m=cmd.match(/(\\d{3,5})/);if(Math.random()<P.descend)r=m?L.desc_a(cc,m[1]):`${cc}，可以下降。`;else r=m?L.desc_d(cc,m[1]):`${cc}，不同意，有交叉交通。`;break;}
+case"hdg":{let m=cmd.match(/(\\d{2,3})/);if(Math.random()<P.heading)r=m?L.hdg_a(cc,m[1]):`${cc}，可以转向。`;else r=m?L.hdg_d(cc,m[1]):`${cc}，不同意，请继续当前航向。`;break;}
+case"spd":{let m=cmd.match(/(\\d{2,4})/);if(Math.random()<P.speed)r=m?L.spd_a(cc,m[1]):`${cc}，可以调速。`;else r=m?L.spd_d(cc,m[1]):`${cc}，不同意，请保持当前速度。`;break;}
+case"app":{let t2=schedLand();r=L.app_a(cc,a,t2);break;}case"rog":r=`${cc}，收到。`;break;default:r=L.unknown;}return r;}
+function resetT(){if(timer)clearTimeout(timer);if(!active||!info)return;if(dnd)return;if(min<=0)return;
+function next(){let d=(Math.random()*(max-min)+min)*1000;timer=setTimeout(()=>{if(!active||!info)return;if(dnd){next();return;}let t=(Date.now()-lastIn)/1000;if(t>min&&!waitResp){waitResp=true;noR=0;let m=L.auto(c);logA(m);speak(m);}else if(waitResp){noR++;let m;if(noR<=3)m=L.no_resp(c,noR);else if(noR<=5)m=L.urgent(c);else{m=L.to_ct(c);waitResp=false;logA(m);speak(m);next();return;}logA(m);speak(m);}next();},d);}next();}
+function openSet(){if(setP){setP.style.transform="translateX(-100%)";setP.style.opacity="0";setTimeout(()=>{if(setP)setP.remove();setP=null;},200);return;}let rect=panel.getBoundingClientRect();setP=document.createElement("div");let blurStyle=blur?"backdrop-filter:blur(12px);":"";setP.style.cssText=`position:fixed;top:${rect.top}px;left:${rect.right}px;background:rgba(0,0,0,0.5);border-radius:12px;padding:12px;z-index:100002;width:350px;max-height:${panel.offsetHeight}px;overflow-y:auto;border:1px solid rgba(255,255,255,0.2);color:#fff;font-family:monospace;font-size:11px;transition:transform 0.2s ease,opacity 0.2s ease;transform:translateX(-100%);opacity:0;${blurStyle}`;
+setP.innerHTML=`<div style="margin-bottom:10px;font-weight:bold;text-align:center;">设置</div>
+<div><label>呼叫范围(秒)</label><div style="display:flex;gap:6px;margin-top:4px;"><input id="min" type="number" min="30" max="300" step="10" value="${min}" style="flex:1;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:3px;"><span>-</span><input id="max" type="number" min="30" max="300" step="10" value="${max}" style="flex:1;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:3px;"></div></div>
+<div><label>音量</label><input id="vol" type="range" min="0" max="1" step="0.05" value="${vol}" style="width:100%;margin-top:4px;"><div id="vv" style="text-align:center;font-size:9px;">${Math.round(vol*100)}%</div></div>
+<div><label>毛玻璃 <input id="blurToggle" type="checkbox" ${blur?"checked":""} style="margin-left:8px;"></label></div>
+<div><label>${L.dnd} <input id="dndToggle" type="checkbox" ${dnd?"checked":""} style="margin-left:8px;"></label><div style="font-size:9px;color:#888;">${L.dnd_desc}</div></div>
+<div style="margin:8px 0;border-top:1px solid rgba(255,255,255,0.2);"></div>
+<div><label style="color:#ffaa44;">自定义指令</label></div>
+<div id="clist" style="max-height:120px;overflow:auto;margin-bottom:6px;">${cust.map((c,i)=>`<div style="display:flex;justify-content:space-between;align-items:center;margin:4px 0;padding:3px;background:rgba(255,255,255,0.1);border-radius:4px;"><span style="font-size:10px;">${c.cmd}</span><button data-idx="${i}" class="delc" style="background:#f44336;border:none;border-radius:3px;color:#fff;cursor:pointer;font-size:9px;padding:2px 6px;">删除</button></div>`).join("")}</div>
+<div style="display:flex;gap:6px;margin-bottom:6px;"><input id="nc" placeholder="指令内容" style="flex:1;min-width:0;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:4px;"><input id="nr" placeholder="ATC回复(可用 # 代替呼号)" style="flex:1;min-width:0;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.3);border-radius:4px;color:#fff;padding:4px;"></div>
+<button id="addc" style="width:100%;margin-bottom:8px;padding:4px;background:#4caf50;border:none;border-radius:4px;color:#fff;cursor:pointer;">添加自定义指令</button>
+<div style="margin:8px 0;border-top:1px solid rgba(255,255,255,0.2);"></div>
+<div style="text-align:center;"><div style="font-size:9px;color:#aaa;">哔哩哔哩 @不宅的飞友</div><button id="donate" style="margin-top:4px;padding:2px 10px;background:#ff9800;border:none;border-radius:4px;color:#fff;cursor:pointer;font-size:10px;">三连打赏</button></div>
+<button id="save" style="width:100%;margin-top:8px;padding:5px;background:#2e7d32;border:none;border-radius:4px;color:#fff;cursor:pointer;">保存</button>`;
+document.body.appendChild(setP);
+requestAnimationFrame(()=>{if(setP){setP.style.transform="translateX(0)";setP.style.opacity="1";}});
+document.getElementById("min").value=min;document.getElementById("max").value=max;document.getElementById("vol").value=vol;
+document.getElementById("vol").oninput=()=>{document.getElementById("vv").textContent=Math.round(document.getElementById("vol").value*100)+"%"};
+document.getElementById("donate").onclick=()=>{window.open(A,"_blank")};
+document.querySelectorAll(".delc").forEach(btn=>{btn.onclick=()=>{let idx=parseInt(btn.dataset.idx);cust.splice(idx,1);saveCust();refreshCust();refreshQ();}});
+document.getElementById("addc").onclick=()=>{let nc=document.getElementById("nc").value.trim(),nr=document.getElementById("nr").value.trim();if(nc&&nr){cust.push({cmd:nc,reply:nr,color:"#cccccc"});saveCust();refreshCust();refreshQ();document.getElementById("nc").value="";document.getElementById("nr").value="";}};
+document.getElementById("save").onclick=()=>{if(setP){setP.style.transform="translateX(-100%)";setP.style.opacity="0";setTimeout(()=>{if(setP)setP.remove();setP=null;},200);}min=parseInt(document.getElementById("min").value)||100;max=parseInt(document.getElementById("max").value)||200;if(min>max){let t=min;min=max;max=t}vol=parseFloat(document.getElementById("vol").value)||0;blur=document.getElementById("blurToggle").checked;dnd=document.getElementById("dndToggle").checked;localStorage.setItem("atcMin",min);localStorage.setItem("atcMax",max);localStorage.setItem("atcVol",vol);localStorage.setItem("atcBlur",blur);localStorage.setItem("atcDnd",dnd);applyBlur();resetT();}}
+function onMove(){if(setP)updateSetPos();}
+let resize=false,sx,sy,ss;
+function startResize(e){resize=true;sx=e.clientX;sy=e.clientY;ss=sc;e.preventDefault();e.stopPropagation();}
+function doResize(e){if(!resize)return;let dx=e.clientX-sx,dy=e.clientY-sy,delta=(dx+dy)/200,n=Math.min(1.5,Math.max(0.6,ss+delta));sc=n;localStorage.setItem("atcScale",sc);applyScale();onMove();}
+function stopResize(){resize=false;}
+function show(){
+    if(panel){panel.style.display="block";hid=false;if(active&&info&&!ended){restoreLogs();resetT();}return;}
+    panel=document.createElement("div");panel.id="panel";let bg="rgba(0,0,0,0.35)";let blurStyle=blur?"blur(12px)":"none";panel.style.cssText=`position:fixed;bottom:20px;left:20px;background:${bg};border-radius:12px;width:360px;z-index:99999;font-family:monospace;border:1px solid rgba(255,255,255,0.15);backdrop-filter:${blurStyle};`;document.body.appendChild(panel);hid=false;
+    if(active&&info&&!ended){renderATC();restoreLogs();resetT();}else{renderInfo();}
+}
+function hide(){if(panel){panel.style.display="none";hid=true;if(timer)clearTimeout(timer);}}
+function renderInfo(){if(!panel)return;panel.innerHTML=`<div id="hdr" style="background:rgba(0,0,0,0.3);border-radius:12px 12px 0 0;padding:10px 12px;color:#88ccff;display:flex;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,0.1);"><span style="font-size:18px;font-weight:bold;">ATC模拟</span><div><span id="close" style="cursor:pointer;font-size:14px;">X</span></div></div>
+<div style="padding:12px;"><div><input id="cInp" placeholder="呼号 例: CCA123" value="${c}" style="width:100%;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:6px;color:#fff;padding:6px;box-sizing:border-box;"></div>
+<div style="margin-top:10px;"><input id="dInp" placeholder="起飞机场 例: ZSSS" value="${d}" maxlength="4" style="width:100%;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:6px;color:#fff;padding:6px;box-sizing:border-box;"></div>
+<div style="margin-top:10px;"><input id="aInp" placeholder="到达机场 例: ZBAA" value="${a}" maxlength="4" style="width:100%;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:6px;color:#fff;padding:6px;box-sizing:border-box;"></div>
+<button id="confirm" style="width:100%;margin-top:12px;padding:8px;background:#2e7d32;border:none;border-radius:6px;color:#fff;cursor:pointer;">确认起飞</button>
+<div style="display:flex;gap:8px;margin-top:12px;"><button id="end" style="flex:1;padding:6px;background:#f44336;border:none;border-radius:6px;color:#fff;cursor:pointer;">${L.end}</button></div>
+<div style="margin-top:8px;font-size:9px;color:#666;text-align:center;"><a href="${A}" target="_blank" style="color:#88ccff;">@不宅的飞友</a> | 开源免费</div></div>
+<div id="rh" style="position:absolute;bottom:0;right:0;width:16px;height:16px;cursor:nw-resize;background:rgba(255,255,255,0.2);border-radius:0 0 12px 0;"></div>`;
+let cb=document.getElementById("close");if(cb)cb.onclick=hide;
+let cf=document.getElementById("confirm");if(cf)cf.onclick=()=>{let nc=document.getElementById("cInp").value.trim().toUpperCase(),nd=document.getElementById("dInp").value.trim().toUpperCase(),na=document.getElementById("aInp").value.trim().toUpperCase();if(!nc||!nd||!na){logS("请填写完整信息");speak("请填写完整信息");return;}c=nc;d=nd;a=na;info=true;active=true;ended=false;toClear=false;phase=PHASE.GROUND;clearLogs();renderATC();schedTo();resetT();logA("这里是ATC，收到请回复。");speak("这里是ATC，收到请回复。");};
+let ef=document.getElementById("end");if(ef)ef.onclick=endFlight;
+let rh=document.getElementById("rh");if(rh){rh.addEventListener("mousedown",startResize);rh.addEventListener("touchstart",startResize);}}
+function renderATC(){if(!panel)return;panel.innerHTML=`<div id="hdr" style="background:rgba(0,0,0,0.3);border-radius:12px 12px 0 0;padding:10px 12px;color:#88ccff;display:flex;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,0.1);"><span id="sb" style="font-size:12px;">ATC · ${c} · ${d} → ${a} · ${PN[phase]}</span><div><span id="set" style="cursor:pointer;margin-right:12px;">设置</span><span id="close" style="cursor:pointer;">X</span></div></div>
+<div style="padding:10px;"><div style="display:flex;gap:8px;margin-bottom:8px;"><select id="q" style="flex:1;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:6px;color:#fff;padding:6px;"><option value="" style="color:#aaa;">快捷指令</option></select><select id="r" style="width:80px;background:rgba(0,0,0,0.5);border:1px solid rgba(255,255,255,0.2);border-radius:6px;color:#88ccff;padding:6px;"><option value="">快速</option>${R.map(c=>`<option value="${c}">${c}</option>`).join("")}</select></div>
+<div id="log" style="height:80px;overflow:auto;margin-bottom:8px;background:rgba(0,0,0,0.2);border-radius:6px;padding:6px;"></div>
+<div style="display:flex;gap:8px;margin-top:8px;"><button id="end2" style="flex:1;padding:6px;background:#f44336;border:none;border-radius:6px;color:#fff;cursor:pointer;">${L.end}</button></div>
+<div style="margin-top:6px;font-size:9px;color:#666;text-align:center;"><a href="${A}" target="_blank" style="color:#88ccff;">@不宅的飞友</a> | 按T开关</div></div>
+<div id="rh" style="position:absolute;bottom:0;right:0;width:16px;height:16px;cursor:nw-resize;background:rgba(255,255,255,0.2);border-radius:0 0 12px 0;"></div>`;
+makeDrag(panel);
+let rh=document.getElementById("rh");if(rh){rh.addEventListener("mousedown",startResize);rh.addEventListener("touchstart",startResize);}
+let setb=document.getElementById("set");if(setb)setb.onclick=openSet;
+let cb2=document.getElementById("close");if(cb2)cb2.onclick=hide;
+let ef2=document.getElementById("end2");if(ef2)ef2.onclick=endFlight;
+let qs=document.getElementById("q");if(qs){qs.onchange=e=>{if(e.target.value){send(e.target.value);qs.value="";}}}
+let rs=document.getElementById("r");if(rs){rs.onchange=e=>{let v=e.target.value;if(v){if(v==="报告位置")repPos();else if(v==="再见")sayBye();else send(v);rs.value="";}}}
+refreshQ();lastIn=Date.now();resetT();
+if(window._st)clearInterval(window._st);
+window._st=setInterval(()=>{if(!active||!info){if(window._st)clearInterval(window._st);return}let s=getSt();let g=s.gnd?"G":"A";let sb=document.getElementById("sb");if(sb)sb.innerHTML=`ATC · ${c} · ${d} → ${a} · ${PN[phase]} ${g} ${s.alt}ft`;checkGo();checkUnauth();if(landTime&&!hasLand&&s.gnd)checkLand();},500);}
+function makeDrag(el){let drag=false,ox,oy;el.addEventListener("mousedown",e=>{let tar=e.target;if(!tar||typeof tar.closest!=='function')return;if(tar.closest("button,select,#rh"))return;drag=true;let r=el.getBoundingClientRect();ox=e.clientX-r.left;oy=e.clientY-r.top;el.style.cursor="grabbing";e.preventDefault();});
+window.addEventListener("mousemove",e=>{if(!drag)return;let l=e.clientX-ox,t=e.clientY-oy;l=Math.max(0,Math.min(l,window.innerWidth-el.offsetWidth));t=Math.max(0,Math.min(t,window.innerHeight-el.offsetHeight));el.style.left=l+"px";el.style.top=t+"px";el.style.right="auto";el.style.bottom="auto";onMove();});
+window.addEventListener("mouseup",()=>{drag=false;el.style.cursor="";});}
+window.addEventListener("mousemove",doResize);
+window.addEventListener("mouseup",stopResize);
+document.addEventListener("keydown",function(e){if(e.target.closest&&e.target.closest("input,textarea,select")){e.stopPropagation();return;}if(e.key.toLowerCase()==="t"){e.preventDefault();if(panel&&!hid)hide();else show();}},true);
+function waitForGeoFS(){if(window.geofs&&window.geofs.aircraft&&window.geofs.aircraft.instance){initVoice().then(()=>{console.log("语音就绪");});console.log("GeoFS AI ATC v1.1.2 | 高原机场复飞修复 | 按T开关","color:#88ccff;font-size:14px");}else{setTimeout(waitForGeoFS,500);}}
+waitForGeoFS();
+})();
